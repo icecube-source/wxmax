@@ -1,0 +1,13 @@
+# Core backbone (P0-P3) — data ingestion + verification. No GRIB / no GPU.
+requests>=2.31
+pyyaml>=6.0
+pandas>=2.0
+numpy>=1.24
+duckdb>=0.10
+
+# Modeling/calibration (P4-P6) — install when reaching those phases:
+#   pip install -e ".[models]"
+# scikit-learn>=1.4
+# lightgbm>=4.0
+# mapie>=1.0
+# scoringrules>=0.6

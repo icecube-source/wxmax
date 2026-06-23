@@ -1,0 +1,124 @@
+# US station panel for training + verification.
+# Deliberately diverse to stress terrain/coastal/desert/urban handling.
+# Fields: id (ICAO/ASOS), name, lat, lon, elevation_m, tz (IANA), region, coastal
+stations:
+  - id: KLAX
+    name: Los Angeles Intl
+    lat: 33.9425
+    lon: -118.4081
+    elevation_m: 38
+    tz: America/Los_Angeles
+    region: coastal_west
+    coastal: true
+  - id: KSFO
+    name: San Francisco Intl
+    lat: 37.6213
+    lon: -122.3790
+    elevation_m: 4
+    tz: America/Los_Angeles
+    region: coastal_west
+    coastal: true
+  - id: KSEA
+    name: Seattle-Tacoma Intl
+    lat: 47.4502
+    lon: -122.3088
+    elevation_m: 132
+    tz: America/Los_Angeles
+    region: marine_northwest
+    coastal: true
+  - id: KFAT
+    name: Fresno Yosemite Intl
+    lat: 36.7762
+    lon: -119.7181
+    elevation_m: 102
+    tz: America/Los_Angeles
+    region: central_valley
+    coastal: false
+  - id: KPHX
+    name: Phoenix Sky Harbor Intl
+    lat: 33.4342
+    lon: -112.0116
+    elevation_m: 337
+    tz: America/Phoenix          # no DST
+    region: desert_southwest
+    coastal: false
+  - id: KLAS
+    name: Harry Reid Intl (Las Vegas)
+    lat: 36.0840
+    lon: -115.1537
+    elevation_m: 664
+    tz: America/Los_Angeles
+    region: desert_southwest
+    coastal: false
+  - id: KDEN
+    name: Denver Intl
+    lat: 39.8617
+    lon: -104.6731
+    elevation_m: 1655
+    tz: America/Denver
+    region: high_plains
+    coastal: false
+  - id: KSLC
+    name: Salt Lake City Intl
+    lat: 40.7884
+    lon: -111.9778
+    elevation_m: 1288
+    tz: America/Denver
+    region: mountain_valley
+    coastal: false
+  - id: KASE
+    name: Aspen-Pitkin County (complex terrain)
+    lat: 39.2232
+    lon: -106.8687
+    elevation_m: 2384
+    tz: America/Denver
+    region: mountain
+    coastal: false
+  - id: KDFW
+    name: Dallas-Fort Worth Intl
+    lat: 32.8998
+    lon: -97.0403
+    elevation_m: 185
+    tz: America/Chicago
+    region: south_plains
+    coastal: false
+  - id: KOKC
+    name: Will Rogers World (Oklahoma City)
+    lat: 35.3931
+    lon: -97.6007
+    elevation_m: 397
+    tz: America/Chicago
+    region: plains
+    coastal: false
+  - id: KMDW
+    name: Chicago Midway Intl
+    lat: 41.7860
+    lon: -87.7520
+    elevation_m: 188
+    tz: America/Chicago
+    region: great_lakes_urban
+    coastal: false
+  - id: KMIA
+    name: Miami Intl
+    lat: 25.7959
+    lon: -80.2870
+    elevation_m: 3
+    tz: America/New_York
+    region: humid_subtropical
+    coastal: true
+  - id: KJFK
+    name: John F. Kennedy Intl (New York)
+    lat: 40.6413
+    lon: -73.7781
+    elevation_m: 4
+    tz: America/New_York
+    region: coastal_northeast
+    coastal: true
+  - id: KBOS
+    name: Boston Logan Intl
+    lat: 42.3656
+    lon: -71.0096
+    elevation_m: 6
+    tz: America/New_York
+    region: coastal_northeast
+    coastal: true

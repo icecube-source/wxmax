@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wxmax"
+version = "0.1.0"
+description = "Calibrated multi-model ensemble for 'highest temperature today at X' (US), with prediction intervals."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "pyyaml>=6.0",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "duckdb>=0.10",
+]
+
+[project.optional-dependencies]
+# Modeling/calibration deps (P4-P6). Kept optional so the data + verification
+# backbone (P0-P3) runs with only the core deps above.
+models = [
+    "scikit-learn>=1.4",
+    "lightgbm>=4.0",
+    "mapie>=1.0",
+    "scoringrules>=0.6",
+]
+# Live serving (P7).
+serve = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wxmax*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

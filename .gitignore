@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Local data / caches (forecasts, obs, feature store)
+data/
+*.parquet
+*.duckdb
+
+# Secrets — never commit API keys
+.env
+*.key
+secrets.*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

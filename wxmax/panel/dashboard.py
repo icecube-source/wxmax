@@ -34,6 +34,14 @@ def _read(path: Path) -> pd.DataFrame:
     return store.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
+def _conf_badge(c) -> str:
+    if c is None or (isinstance(c, float) and pd.isna(c)):
+        return ""
+    c = int(c)
+    cls = "high" if c >= 80 else ("mid" if c >= 60 else "low")
+    return f"<span class='conf {cls}'>{c}%</span>"
+
+
 def _fmt_date(daystr: str) -> str:
     try:
         dt = datetime.strptime(daystr, "%Y-%m-%d")
@@ -70,8 +78,9 @@ def _today_panel_rows(est: pd.DataFrame, names: dict) -> str:
         val = pick.get("estimate")
         rng = f"[{pick['lo']:.0f}, {pick['hi']:.0f}]" if pd.notna(pick.get("lo")) else ""
         rows += (f"<tr><td>{names[sid]}</td><td class='num big'>{val:.0f}&deg;F</td>"
-                 f"<td class='num'>{rng}</td><td>{badge}</td></tr>")
-    return rows or "<tr><td colspan='4'>no rows for latest day</td></tr>"
+                 f"<td class='num'>{rng}</td><td>{_conf_badge(pick.get('confidence'))}</td>"
+                 f"<td>{badge}</td></tr>")
+    return rows or "<tr><td colspan='5'>no rows for latest day</td></tr>"
 
 
 def _realized_section(truth: pd.DataFrame, names: dict) -> str:
@@ -168,6 +177,11 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 .badge {{ font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight:600; }}
 .badge.high {{ background:#e4f5e9; color:#1a7f37; }}
 .badge.est {{ background:#fdf3d8; color:#9a6700; }}
+.conf {{ font-size:12px; font-weight:700; padding:2px 8px; border-radius:10px; }}
+.conf.high {{ background:#e4f5e9; color:#1a7f37; }}
+.conf.mid {{ background:#fdf3d8; color:#9a6700; }}
+.conf.low {{ background:#fde8e8; color:#b42318; }}
+.cap {{ font-size:12px; color:#6b7280; margin:6px 2px 0; }}
 .wrow {{ margin: 6px 0; }}
 .wlabel {{ font-size: 13px; margin-bottom: 3px; }}
 .bar {{ display:flex; height: 14px; border-radius: 4px; overflow:hidden; background:#e3e6ea; }}
@@ -184,8 +198,10 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 <div class="sub">12 US cities &middot; ground truth = NWS Climatological Report (CLI) &middot; generated {gen}</div>
 
 <h2>Today's panel</h2>
-<table><tr><th>City</th><th class="num">Max &deg;F</th><th class="num">Interval</th><th>Call</th></tr>
+<table><tr><th>City</th><th class="num">Max &deg;F</th><th class="num">Interval</th><th>Confidence</th><th>Call</th></tr>
 {_today_panel_rows(est, names)}</table>
+<p class="cap">Confidence = forecast-interval tightness (expert agreement + conviction).
+HIGH-conviction means the daily peak has already passed, so the max is essentially locked.</p>
 
 <h2>Realized max temperature (NWS CLI) over time</h2>
 {_realized_section(truth, names)}
@@ -193,6 +209,8 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 <h2>Forecast accuracy vs NWS CLI (MAE &deg;F)</h2>
 <table><tr><th>City</th><th class="num">MAE</th><th class="num">n days</th></tr>
 {_accuracy_rows(est, truth, names)}</table>
+<p class="cap">MAE = mean absolute error: the average of |forecast &minus; official CLI max|, in &deg;F.
+Lower is better (e.g. MAE 1.5 = off by 1.5&deg;F on average).</p>
 
 <h2>Per-region expert weights <button id="wbtn" class="toggle" onclick="toggleW()">hide</button></h2>
 <div id="weights">

@@ -21,6 +21,7 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 from .. import store
@@ -34,6 +35,18 @@ from ..stations import Station, load_stations
 from ..timeutil import to_local
 
 EXPERTS = ["nws_nbm", "ecmwf_ifs", "ecmwf_aifs", "gfs"]
+
+
+def confidence_score(half_width: float) -> int:
+    """0-100 confidence from the forecast interval half-width (°F).
+
+    A tighter band = more confident. This unifies both signals: in the morning
+    ESTIMATE phase the half-width grows with expert disagreement (low confidence
+    when models diverge); once a city flips to HIGH conviction the band collapses
+    to ~0.5°F, so it naturally scores near-certain. NOT a calibrated probability
+    -- it's a monotone, interpretable tightness score (capped 30-98).
+    """
+    return int(round(max(30.0, min(98.0, 100.0 - 7.5 * half_width))))
 
 
 class Panel:
@@ -101,11 +114,17 @@ class Panel:
             ev = experts[st.id]
             est = self.blend.predict(st.id, ev)
             w = self.blend.weights(st.id)
+            # interval half-width grows with cross-expert disagreement (spread)
+            vals = list(ev.values())
+            spread = float(np.std(vals)) if len(vals) >= 2 else 0.0
+            half = min(10.0, max(1.5, 1.0 + 1.25 * spread))
             rows.append({
                 "date": d.isoformat(), "station": st.id, "conviction": "ESTIMATE",
                 "estimate": round(est, 1) if est is not None else None,
-                "lo": round(est - 5, 1) if est is not None else None,
-                "hi": round(est + 5, 1) if est is not None else None,
+                "lo": round(est - half, 1) if est is not None else None,
+                "hi": round(est + half, 1) if est is not None else None,
+                "confidence": confidence_score(half) if est is not None else None,
+                "spread": round(spread, 1),
                 "n_experts": len(ev),
                 **{f"x_{k}": round(v, 1) for k, v in ev.items()},
                 "weights": json.dumps({k: round(w[k], 3) for k in ev}),
@@ -146,6 +165,7 @@ class Panel:
             rows.append({
                 "date": d.isoformat(), "station": st.id, "conviction": "HIGH",
                 "estimate": round(nc.high, 1), "lo": round(nc.lo, 1), "hi": round(nc.hi, 1),
+                "confidence": confidence_score((nc.hi - nc.lo) / 2.0),
                 "obs_max_so_far": round(obs_max, 1), "n_signals": conv.n_signals,
             })
         if rows:
@@ -156,6 +176,7 @@ class Panel:
         """Record official CLI truth and update each station's expert weights."""
         if expert_values is None:
             expert_values = self._expert_values_from_estimates(d)
+        scored = self._scored_stations(d)  # already counted -> don't double-update
         rows = []
         for st in self.stations:
             cli = fetch_cli_max(st.id, d)
@@ -163,13 +184,38 @@ class Panel:
                 rows.append({"date": d.isoformat(), "station": st.id, "cli_max_f": None})
                 continue
             ev = expert_values.get(st.id, {})
-            if ev:
+            if ev and st.id not in scored:
                 self.blend.update(st.id, ev, cli.cli_max_f)
             rows.append({"date": d.isoformat(), "station": st.id, "cli_max_f": cli.cli_max_f,
                          "high_time": cli.high_time})
         self._save_blend()
         self._append("truth", rows, keys=["date", "station"])
         return pd.DataFrame(rows)
+
+    def _scored_stations(self, d: date) -> set[str]:
+        """Stations whose truth for day `d` is already recorded (weights applied)."""
+        path = self.dir / "truth.parquet"
+        if not path.exists():
+            return set()
+        t = store.read_parquet(path)
+        t = t[(t["date"] == d.isoformat()) & t["cli_max_f"].notna()]
+        return set(t["station"])
+
+    def rebuild_weights(self) -> None:
+        """Deterministically replay the committed (estimates, truth) history into a
+        fresh blend -- one update per (station, day). Makes the learned weights
+        reproducible and repairs any prior double-counting."""
+        self.blend = OnlineExpertBlend(EXPERTS)
+        path = self.dir / "truth.parquet"
+        if path.exists():
+            truth = store.read_parquet(path).dropna(subset=["cli_max_f"])
+            for d_iso in sorted(truth["date"].unique()):
+                ev_by = self._expert_values_from_estimates(date.fromisoformat(d_iso))
+                for _, r in truth[truth.date == d_iso].iterrows():
+                    ev = ev_by.get(r["station"])
+                    if ev:
+                        self.blend.update(r["station"], ev, float(r["cli_max_f"]))
+        self._save_blend()
 
     def _expert_values_from_estimates(self, d: date) -> dict[str, dict[str, float]]:
         path = self.dir / "estimates.parquet"

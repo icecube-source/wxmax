@@ -143,7 +143,8 @@ def _weight_bars(weights: dict, names: dict) -> str:
     return out + f"<div class='legend'>{legend}</div>"
 
 
-def render(cfg: Config | None = None, generated_at: str | None = None) -> Path:
+def render(cfg: Config | None = None, generated_at: str | None = None,
+           refresh_seconds: int = 900) -> Path:
     cfg = cfg or load_config()
     cfg.docs_dir.mkdir(parents=True, exist_ok=True)
     reg = load_stations(cfg.stations_path)
@@ -158,6 +159,7 @@ def render(cfg: Config | None = None, generated_at: str | None = None) -> Path:
 
     html = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{refresh_seconds}">
 <title>wxmax daily max-temp panel</title>
 <style>
 body {{ font-family: -apple-system, system-ui, sans-serif; margin: 0; background:#f7f8fa; color:#1a1d21; }}

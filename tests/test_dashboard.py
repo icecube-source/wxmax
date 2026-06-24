@@ -41,3 +41,4 @@ def test_dashboard_renders(tmp_path, monkeypatch):
     assert "June" in html                      # today's date rendered in header
     assert "Confidence" in html                # confidence column
     assert "mean absolute error" in html       # MAE caption
+    assert 'http-equiv="refresh"' in html      # auto-refresh

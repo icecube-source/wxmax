@@ -86,6 +86,49 @@ scripts/demo_eval.py   reproducible demo
   BigQuery), FastAPI endpoint, arbitrary-point snapping + terrain adjustment.
 - **Truth**: add GHCN-Daily TMAX (CC0) as the QC'd historical authority.
 
+## Continuous hosting + instant alerts
+
+GitHub Actions cron is fine for a once/twice-daily refresh, but **not** for a
+15-minute "alert the moment a city locks" loop (its schedule is best-effort, and
+high-frequency private-repo runs blow the free minutes). For that, run the
+always-on **watcher**:
+
+```bash
+pip install -e ".[panel]"
+# refresh every 15 min, serve the dashboard locally, pick an alert channel:
+WXMAX_ALERT=desktop python -m wxmax.panel.watch --serve 8000                       # macOS pop-ups
+WXMAX_ALERT=ntfy WXMAX_NTFY_TOPIC=my-secret-topic python -m wxmax.panel.watch      # phone/desktop push
+WXMAX_ALERT=email SMTP_HOST=smtp.gmail.com SMTP_USER=you@gmail.com \
+  SMTP_PASS=app-password ALERT_TO=you@example.com python -m wxmax.panel.watch
+```
+
+Each tick (default `--interval 900` = 15 min) it: runs the morning estimate once
+per day, polls observations, fires **one alert per city per day the instant its
+max locks** (hottest part of the day has passed → high conviction), records the
+official CLI max + updates weights after ~14 UTC, and regenerates the
+auto-refreshing dashboard. `--serve PORT` exposes it at `http://localhost:PORT/`.
+
+**Where to run it (pick one):**
+- **Your Mac, always on** — `WXMAX_ALERT=desktop`, $0, native pop-ups. Keep alive
+  at login with a launchd agent.
+- **A $5/mo VPS** (Hetzner/Fly.io/DigitalOcean) — `WXMAX_ALERT=ntfy` (free push)
+  or `email`; keep alive with systemd. Comfortably within a $10–20 budget.
+
+Minimal systemd unit (VPS):
+```ini
+[Service]
+WorkingDirectory=/opt/wxmax
+Environment=WXMAX_ALERT=ntfy WXMAX_NTFY_TOPIC=my-secret-topic
+ExecStart=/opt/wxmax/.venv/bin/python -m wxmax.panel.watch --serve 8080
+Restart=always
+[Install]
+WantedBy=multi-user.target
+```
+
+Alert backends: `log` (default), `desktop` (macOS), `email` (SMTP), `ntfy`
+(ntfy.sh push), `slack` (webhook). Data stays $0/key-free; only the alert channel
+may need one credential (an SMTP app password — or none for ntfy/desktop).
+
 ## Licensing (commercial-clean)
 
 NOAA = public domain; ECMWF/DWD = CC-BY; GHCN = CC0. Open-Meteo **free tier is

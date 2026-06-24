@@ -54,14 +54,23 @@ def new_locks(high_df, alerted: set) -> list[dict]:
     return out
 
 
+class _NoCacheHandler(SimpleHTTPRequestHandler):
+    """Serve the dashboard with no-cache headers so a browser refresh never shows
+    a stale (304-cached) copy once the watcher has rewritten the file."""
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
+
 def _serve(cfg, port: int) -> None:
-    handler = partial(SimpleHTTPRequestHandler, directory=str(cfg.docs_dir))
+    handler = partial(_NoCacheHandler, directory=str(cfg.docs_dir))
     srv = ThreadingHTTPServer(("0.0.0.0", port), handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     print(f"dashboard served at http://localhost:{port}/  (auto-refreshes)", flush=True)
 
 
-def tick(panel: Panel, names: dict, alerted: set, interval: int, alert_backend, state: dict) -> None:
+def tick(panel: Panel, names: dict, alerted: set, browser_refresh: int, alert_backend, state: dict) -> None:
     now = datetime.now(timezone.utc)
     today = now.date()
     if state.get("day") != today:
@@ -88,12 +97,14 @@ def tick(panel: Panel, names: dict, alerted: set, interval: int, alert_backend, 
         state["ended"] = True
         print(f"[{now:%H:%MZ}] end_of_day {today - timedelta(days=1)} (CLI truth + weights)", flush=True)
 
-    dashboard.render(panel.cfg, refresh_seconds=interval)
+    dashboard.render(panel.cfg, refresh_seconds=browser_refresh)
 
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Continuous wxmax panel watcher + alerter.")
-    ap.add_argument("--interval", type=int, default=900, help="seconds between ticks (default 900 = 15 min)")
+    ap.add_argument("--interval", type=int, default=900, help="seconds between data ticks (default 900 = 15 min)")
+    ap.add_argument("--browser-refresh", type=int, default=60, dest="browser_refresh",
+                    help="seconds for the dashboard's browser auto-refresh (default 60)")
     ap.add_argument("--serve", type=int, default=0, help="serve dashboard on this port (0 = off)")
     ap.add_argument("--alert", default=None, help="override WXMAX_ALERT backend (log/desktop/email/ntfy/slack)")
     ap.add_argument("--once", action="store_true", help="run a single tick and exit (for testing)")
@@ -110,7 +121,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"watcher up: every {a.interval}s, alert backend = {a.alert or 'env/log'}", flush=True)
     while True:
         try:
-            tick(panel, names, alerted, a.interval, a.alert, state)
+            tick(panel, names, alerted, a.browser_refresh, a.alert, state)
         except Exception as e:  # a transient fetch error shouldn't kill the loop
             print(f"[tick-error] {type(e).__name__}: {e}", flush=True)
         if a.once:

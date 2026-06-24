@@ -16,6 +16,7 @@ station (each location is its own expert-advice problem).
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -59,6 +60,14 @@ def apply_heat_regime(point: float, half: float, conf: int) -> tuple[float, floa
     """Adjust an ESTIMATE when an active heat alert puts a city in the extreme tail."""
     p = point + HEAT_BIAS_F
     return p, p - half, p + half + HEAT_HEADROOM_F, min(conf, HEAT_CONF_CAP)
+
+
+def round_nws(temp_f: float) -> int:
+    """Round to whole °F the way the NWS Climatological Report does: half UP
+    (71.5 -> 72), not Python's banker's rounding. The CLI ground truth is whole
+    °F, so we report whole °F by the same rule -- otherwise a 71.6°F forecast vs
+    a 72°F official max would book a spurious 1° miss from rounding alone."""
+    return int(math.floor(temp_f + 0.5))
 
 
 class Panel:
@@ -140,9 +149,9 @@ class Panel:
                     regime, event = "heat", h.event
             rows.append({
                 "date": d.isoformat(), "station": st.id, "conviction": "ESTIMATE",
-                "estimate": round(point, 1) if point is not None else None,
-                "lo": round(lo, 1) if lo is not None else None,
-                "hi": round(hi, 1) if hi is not None else None,
+                "estimate": round_nws(point) if point is not None else None,
+                "lo": round_nws(lo) if lo is not None else None,
+                "hi": round_nws(hi) if hi is not None else None,
                 "confidence": conf,
                 "regime": regime, "alert_event": event,
                 "spread": round(spread, 1),
@@ -197,9 +206,9 @@ class Panel:
             nc = intraday_nowcast(obs_max, obs_now, rise, high_conviction=True)
             rows.append({
                 "date": d.isoformat(), "station": st.id, "conviction": "HIGH",
-                "estimate": round(nc.high, 1), "lo": round(nc.lo, 1), "hi": round(nc.hi, 1),
+                "estimate": round_nws(nc.high), "lo": round_nws(nc.lo), "hi": round_nws(nc.hi),
                 "confidence": confidence_score((nc.hi - nc.lo) / 2.0),
-                "obs_max_so_far": round(obs_max, 1), "n_signals": conv.n_signals,
+                "obs_max_so_far": round_nws(obs_max), "n_signals": conv.n_signals,
             })
         if rows:
             self._append("estimates", rows, keys=["date", "station", "conviction"])

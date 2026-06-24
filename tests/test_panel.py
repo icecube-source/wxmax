@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 import wxmax.panel.panel as pp
 from wxmax.config import load_config
-from wxmax.panel.panel import Panel
+from wxmax.panel.panel import Panel, round_nws
 
 
 class _FakeCli:
@@ -30,7 +30,7 @@ def test_panel_lifecycle_learns_to_downweight_biased_expert(tmp_path, monkeypatc
     assert (df["conviction"] == "ESTIMATE").all()
     # cold start: blend ~ simple average of the 3 experts
     klax_est = df[df.station == "KLAX"]["estimate"].iloc[0]
-    assert abs(klax_est - (72 + 80 + 71) / 3) < 0.2
+    assert klax_est == round_nws((72 + 80 + 71) / 3)  # whole °F, NWS rounding
     assert "confidence" in df.columns
     assert df["confidence"].between(30, 98).all()
 
@@ -49,6 +49,14 @@ def test_panel_lifecycle_learns_to_downweight_biased_expert(tmp_path, monkeypatc
     # a fresh Panel reloads the learned weights from disk
     reloaded = Panel(cfg=cfg, station_ids=("KLAX", "KPHX"))
     assert reloaded.blend.weights("KLAX")["ecmwf_ifs"] == w["ecmwf_ifs"]
+
+
+def test_round_nws_half_up():
+    assert round_nws(71.5) == 72   # half rounds UP
+    assert round_nws(72.5) == 73   # half UP (Python's banker's rounding would give 72)
+    assert round_nws(71.4) == 71
+    assert round_nws(71.6) == 72
+    assert round_nws(109.0) == 109
 
 
 def test_end_of_day_idempotent_and_rebuild(tmp_path, monkeypatch):

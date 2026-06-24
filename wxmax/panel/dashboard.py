@@ -180,7 +180,7 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 .foot {{ margin-top: 40px; font-size: 12px; color:#9aa0aa; }}
 </style></head><body><div class="wrap">
 <h1>wxmax &mdash; daily maximum temperature panel</h1>
-<div class="today">{date_str}</div>
+<div class="today">Forecast day: {date_str} <span class="muted" style="font-weight:400">(US local)</span></div>
 <div class="sub">12 US cities &middot; ground truth = NWS Climatological Report (CLI) &middot; generated {gen}</div>
 
 <h2>Today's panel</h2>

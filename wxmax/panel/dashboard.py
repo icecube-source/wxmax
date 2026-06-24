@@ -168,14 +168,22 @@ def _weight_bars(weights: dict, names: dict) -> str:
         return "<p class='muted'>weights start uniform and adapt as CLI truth arrives.</p>"
     out = ""
     for sid in names:
-        r = regions.get(sid)
+        r = regions.get(sid)                       # {expert: {b, s2, n}}
         if not r:
             continue
-        segs = "".join(
-            f"<div class='seg' style='width:{w*100:.1f}%;background:{EXPERT_COLORS.get(e,'#888')}' "
-            f"title='{e}: {w:.2f}'></div>" for e, w in zip(experts, r["w"]))
+        inv = {e: 1.0 / max(r[e]["s2"], 0.25) for e in experts if e in r}
+        z = sum(inv.values()) or 1.0
+        w = {e: inv[e] / z for e in inv}
+        nupd = int(max((r[e]["n"] for e in r), default=0))
+        segs = ""
+        for e in experts:
+            if e not in r:
+                continue
+            we, be, sde = w.get(e, 0.0), r[e]["b"], r[e]["s2"] ** 0.5
+            segs += (f"<div class='seg' style='width:{we*100:.1f}%;background:{EXPERT_COLORS.get(e,'#888')}' "
+                     f"title='{e}: w={we:.2f}, bias {be:+.1f}F, sd {sde:.1f}F'></div>")
         out += (f"<div class='wrow'><div class='wlabel'>{names[sid]}"
-                f"<span class='muted'> &middot; {r['n']} updates</span></div>"
+                f"<span class='muted'> &middot; {nupd} updates</span></div>"
                 f"<div class='bar'>{segs}</div></div>")
     legend = " ".join(
         f"<span class='lg'><i style='background:{EXPERT_COLORS.get(e,'#888')}'></i>{e}</span>"
@@ -250,7 +258,8 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 <p class="cap"><b>Morning est</b> = the static begin-of-day forecast (fixed all day).
 <b>Real-time best</b> = the live best estimate of today's max &mdash; it updates every few minutes and
 converges to the realized max as the peak passes; <span class="lock">&#128274;</span> = LOCKED.
-<b>Confidence</b> = calibrated P(daily max already occurred), climbing through the afternoon (locks at 85%).
+<b>Confidence</b> = P(today's official max within &plusmn;1&deg;F of our estimate) &mdash; forecast-driven in the
+morning (expert agreement + skill), sharpening as obs arrive, ~99% once locked. The LOCK fires separately when P(peak passed) &ge; 85%.
 <b>Clim peak</b> = this city's typical peak-hour window (median&ndash;P90, local) from its own history.
 <span class="heat">&#9888; HEAT</span> = active NWS heat alert.</p>
 

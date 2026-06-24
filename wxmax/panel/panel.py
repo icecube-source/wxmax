@@ -31,8 +31,10 @@ from ..ingest import alerts_nws, forecasts_ecmwf, forecasts_nodd, obs_nws
 from ..ingest.truth_cli import fetch_cli_max
 from ..models.online_experts import OnlineExpertBlend
 from ..nowcast import peak_climatology
-from ..nowcast.confidence import decide_lock, peak_passed_confidence, real_time_best
+from ..nowcast.confidence import decide_lock, peak_passed_confidence
 from ..nowcast.hotspot import model_remaining_rise
+from ..nowcast.predictive import real_time_estimate
+from ..verify.calibrate_confidence import load_conf_lambda
 from ..verify.calibrate_peak import load_calibration
 from ..stations import Station, load_stations
 from ..timeutil import to_local
@@ -80,6 +82,7 @@ class Panel:
         self.dir = self.cfg.panel_dir
         self.dir.mkdir(parents=True, exist_ok=True)
         self.blend = self._load_blend()
+        self.conf_lambda = load_conf_lambda(self.cfg)
 
     # ---- persistence -------------------------------------------------------
     @property
@@ -88,7 +91,10 @@ class Panel:
 
     def _load_blend(self) -> OnlineExpertBlend:
         if self._weights_path.exists():
-            return OnlineExpertBlend.from_state(json.loads(self._weights_path.read_text()))
+            try:
+                return OnlineExpertBlend.from_state(json.loads(self._weights_path.read_text()))
+            except Exception:
+                pass  # legacy/incompatible state -> start fresh with priors
         return OnlineExpertBlend(EXPERTS)
 
     def _save_blend(self) -> None:
@@ -136,18 +142,23 @@ class Panel:
         rows = []
         for st in self.stations:
             ev = experts[st.id]
-            est = self.blend.predict(st.id, ev)
+            mu_F, var_F = self.blend.predict_dist(st.id, ev)
             w = self.blend.weights(st.id)
-            # interval half-width grows with cross-expert disagreement (spread)
-            vals = list(ev.values())
-            spread = float(np.std(vals)) if len(vals) >= 2 else 0.0
-            half = min(10.0, max(1.5, 1.0 + 1.25 * spread))
-            point, lo, hi, conf, regime, event = est, None, None, None, "normal", None
-            if est is not None:
-                lo, hi, conf = est - half, est + half, confidence_score(half)
+            point = lo = hi = conf = None
+            sigma_F = None
+            regime, event = "normal", None
+            if mu_F is not None:
+                sigma_F = math.sqrt(max(var_F, 0.0))
+                # pure forecast confidence: P(|Y-mu_F| <= 1°F) (no obs floor yet)
+                r = real_time_estimate(mu_F, var_F, m_t=mu_F - 50.0, p_peak=0.0,
+                                       lam=self.conf_lambda)
+                point, lo, hi, conf = r["yhat"], r["lo"], r["hi"], int(round(r["confidence"] * 100))
                 h = heat.get(st.id)
                 if h is not None:  # extreme-tail regime: skew up + cap confidence
-                    point, lo, hi, conf = apply_heat_regime(est, half, conf)
+                    point += HEAT_BIAS_F
+                    lo += HEAT_BIAS_F
+                    hi += HEAT_BIAS_F + HEAT_HEADROOM_F
+                    conf = min(conf, HEAT_CONF_CAP)
                     regime, event = "heat", h.event
             rows.append({
                 "date": d.isoformat(), "station": st.id, "conviction": "ESTIMATE",
@@ -155,8 +166,9 @@ class Panel:
                 "lo": round_nws(lo) if lo is not None else None,
                 "hi": round_nws(hi) if hi is not None else None,
                 "confidence": conf,
+                "fc_mu": round(mu_F, 2) if mu_F is not None else None,
+                "fc_sigma": round(sigma_F, 2) if sigma_F is not None else None,
                 "regime": regime, "alert_event": event,
-                "spread": round(spread, 1),
                 "n_experts": len(ev),
                 **{f"x_{k}": round(v, 1) for k, v in ev.items()},
                 "weights": json.dumps({k: round(w[k], 3) for k in ev}),
@@ -220,15 +232,17 @@ class Panel:
             dwell_floor = params.get("dwell_min", 40.0)
             locked = decide_lock(conf, now_hour, p_lock, dwell_floor, rise,
                                  threshold=self.cfg.lock_threshold)
-            p = conf or 0.0
-            m_est, m_half = morning.get(st.id, (None, 5.0))
-            rt_best, rt_lo, rt_hi = real_time_best(obs_max, obs_now, rise, m_est, m_half, p, locked)
+            p_peak = conf or 0.0
+            fc_mu, fc_sigma = morning.get(st.id, (None, None))
+            if fc_mu is None:  # no morning row -> fall back to an obs-anchored forecast
+                fc_mu, fc_sigma = max(obs_max, obs_now + max(0.0, rise or 0.0)), 3.0
+            rt = real_time_estimate(fc_mu, fc_sigma ** 2, obs_max, p_peak, lam=self.conf_lambda)
             rows.append({
                 "date": d.isoformat(), "station": st.id,
                 "conviction": "HIGH" if locked else "TRACKING",
-                "estimate": round_nws(rt_best), "lo": round_nws(rt_lo), "hi": round_nws(rt_hi),
-                "peak_passed": round(p, 3),
-                "confidence": int(round(p * 100)),
+                "estimate": round_nws(rt["yhat"]), "lo": round_nws(rt["lo"]), "hi": round_nws(rt["hi"]),
+                "peak_passed": round(p_peak, 3),               # lock signal (separate from confidence)
+                "confidence": int(round(rt["confidence"] * 100)),  # P(|Y-yhat|<=1°F), all-day meaningful
                 "obs_max_so_far": round_nws(obs_max), "dwell_min": round(dwell_min),
                 "p_clim": round(p_clim, 3) if p_clim is not None else None,
             })
@@ -237,7 +251,9 @@ class Panel:
         return pd.DataFrame(rows)
 
     def _morning_estimates(self, d: date) -> dict:
-        """{station: (estimate, half_width)} from today's start-of-day ESTIMATE rows."""
+        """{station: (fc_mu, fc_sigma)} = today's forecast distribution from the
+        start-of-day ESTIMATE rows (the learner only updates daily, so this is the
+        intraday forecast component)."""
         path = self.dir / "estimates.parquet"
         out: dict = {}
         if not path.exists():
@@ -245,10 +261,8 @@ class Panel:
         df = store.read_parquet(path)
         df = df[(df["date"] == d.isoformat()) & (df["conviction"] == "ESTIMATE")]
         for _, r in df.iterrows():
-            if pd.notna(r.get("estimate")):
-                half = ((float(r["hi"]) - float(r["lo"])) / 2.0
-                        if pd.notna(r.get("lo")) and pd.notna(r.get("hi")) else 5.0)
-                out[r["station"]] = (float(r["estimate"]), half)
+            if "fc_mu" in r and pd.notna(r.get("fc_mu")) and pd.notna(r.get("fc_sigma")):
+                out[r["station"]] = (float(r["fc_mu"]), float(r["fc_sigma"]))
         return out
 
     def end_of_day(self, d: date, expert_values: dict[str, dict[str, float]] | None = None) -> pd.DataFrame:

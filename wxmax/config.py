@@ -69,6 +69,7 @@ class Config:
     # 0.85 = "Earlier" profile (locks sooner; ~5-8% may lock before the true peak).
     lock_threshold: float = 0.85
     early_lock_budget: float = 0.06   # back-test target for locked-before-true-peak
+    conf_lambda: float = 1.0          # confidence dispersion multiplier (calibrated from history)
 
     @property
     def obs_dir(self) -> Path:

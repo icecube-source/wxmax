@@ -1,133 +1,113 @@
-"""Online source selection as prediction from expert advice.
+"""Online source selection as variance-aware Bayesian Model Averaging.
 
-Each forecast source is an "expert". Each day, per region, we predict a weighted
-convex combination of the experts (the "ensemble ratio"), then -- once the NWS
-CLI official max is observed -- pay a loss and update the weights. This is the
-classic Hedge / Multiplicative-Weights algorithm; with a Fixed-Share step it
-*tracks the best expert over time*, so the weighting adapts to seasons and model
-upgrades instead of locking onto a stale historical winner.
+Each forecast source is an "expert". Per region we track, online, each expert's
+running BIAS and ERROR VARIANCE (EWMA with forgetting, so it adapts to seasons /
+model upgrades). We DE-BIAS each expert and combine by INVERSE-VARIANCE weights
+(a fixed-share floor keeps the Hedge-style tracking property so a recovering
+expert isn't locked out). This yields both the blend weights AND a calibrated
+predictive variance (BMA within + between-expert), which the confidence layer
+needs — plain Hedge gave weights but no variance, so confidence wasn't derivable.
 
-Guarantee (Hedge): regret vs. the best fixed expert is O(sqrt(T ln N)) -- the
-weighted blend provably converges toward the best source(s) per region, and in
-practice beats the naive equal-weight average within days.
+Update (after CLI truth y), for each present expert i:
+    e   = f_i - y
+    b_i <- b_i + bias_lr * (e - b_i)                  # running bias
+    r   = e - b_i
+    s2_i<- max((1-var_lr)*s2_i + var_lr*r^2, s2_floor) # running error variance
+Blend (over present experts):
+    g_i = f_i - b_i                                   # de-biased forecast
+    w_i ∝ 1/s2_i ;  w <- (1-alpha)w + alpha/N         # inverse-variance + fixed-share
+    mu_F  = Σ w_i g_i
+    s2_F  = kappa * Σ w_i (s2_i + (g_i - mu_F)^2)      # within + between (BMA), corr-inflated
 
-Update (after truth y_t), for experts present on round t:
-    loss_i  = clip(|f_i - y_t| / L_max, 0, 1)
-    w_i    <- w_i * exp(-eta * loss_i)          # multiplicative weights
-    w      <- w / sum(w)                         # renormalize
-    w_i    <- (1 - alpha) * w_i + alpha / N      # fixed-share (drift)
-with eta = sqrt(8 ln N / horizon).
-
-State is plain dict (JSON/Parquet serializable) so the panel can persist and
-reload per-region weights across daily runs.
+Refs: Raftery et al. 2005 (BMA), Fisher inverse-variance pooling, Herbster-Warmuth
+fixed-share. State is JSON-serializable for daily persistence.
 """
 from __future__ import annotations
 
 import math
 
-import numpy as np
+# Informed cold-start priors on each expert's error variance (°F^2). NWS-NBM and
+# GFS-seamless were tighter in R&D; ECMWF coarser (esp. coastal). Tunable.
+DEFAULT_PRIOR_S2 = {"nws_nbm": 4.0, "gfs": 4.0, "ecmwf_ifs": 9.0, "ecmwf_aifs": 9.0}
+PRIOR_FALLBACK = 6.25  # (2.5 °F)^2
+
+
+def _is_present(v) -> bool:
+    return v is not None and not (isinstance(v, float) and math.isnan(v))
 
 
 class OnlineExpertBlend:
-    def __init__(
-        self,
-        experts: list[str],
-        horizon: int = 365,
-        alpha: float = 0.02,
-        l_max: float = 20.0,
-        eta: float | None = None,
-    ) -> None:
-        if len(experts) < 1:
+    def __init__(self, experts: list[str], alpha: float = 0.02, bias_lr: float = 0.08,
+                 var_lr: float = 0.06, s2_floor: float = 0.25, kappa: float = 1.0,
+                 priors: dict | None = None) -> None:
+        if not experts:
             raise ValueError("need at least one expert")
         self.experts = list(experts)
         self.n = len(self.experts)
-        self.alpha = alpha
-        self.l_max = l_max
-        # theory-optimal learning rate for N experts over `horizon` rounds
-        self.eta = eta if eta is not None else math.sqrt(8.0 * math.log(max(self.n, 2)) / horizon)
-        # per-region state: key -> {"w": np.array, "n": int, "cum_loss": np.array, "cum_blend": float}
+        self.alpha, self.bias_lr, self.var_lr = alpha, bias_lr, var_lr
+        self.s2_floor, self.kappa = s2_floor, kappa
+        self.priors = priors or {e: DEFAULT_PRIOR_S2.get(e, PRIOR_FALLBACK) for e in self.experts}
+        # per-region: {expert: {"b":bias, "s2":var, "n":count}}
         self._state: dict[str, dict] = {}
 
-    # ---- per-region weight vectors ----------------------------------------
     def _region(self, key: str) -> dict:
         if key not in self._state:
-            self._state[key] = {
-                "w": np.full(self.n, 1.0 / self.n),
-                "n": 0,
-                "cum_loss": np.zeros(self.n),  # per-expert cumulative normalized loss
-                "cum_blend": 0.0,              # blend cumulative normalized loss
-            }
+            self._state[key] = {e: {"b": 0.0, "s2": float(self.priors.get(e, PRIOR_FALLBACK)),
+                                    "n": 0.0} for e in self.experts}
         return self._state[key]
 
-    def weights(self, key: str) -> dict[str, float]:
-        w = self._region(key)["w"]
-        return dict(zip(self.experts, w.tolist()))
+    def _present(self, values: dict) -> list[str]:
+        return [e for e in self.experts if e in values and _is_present(values[e])]
 
     # ---- prediction --------------------------------------------------------
-    def _present_mask(self, values: dict[str, float]) -> np.ndarray:
-        return np.array([
-            e in values and values[e] is not None and not (isinstance(values[e], float) and math.isnan(values[e]))
-            for e in self.experts
-        ])
+    def predict_dist(self, key: str, values: dict) -> tuple[float | None, float | None]:
+        """De-biased BMA blend -> (mu_F, sigma_F^2) over present experts."""
+        reg = self._region(key)
+        present = self._present(values)
+        if not present:
+            return (None, None)
+        inv = {e: 1.0 / max(reg[e]["s2"], self.s2_floor) for e in present}
+        z = sum(inv.values())
+        w = {e: inv[e] / z for e in present}
+        w = {e: (1 - self.alpha) * w[e] + self.alpha / len(present) for e in present}  # fixed-share
+        g = {e: values[e] - reg[e]["b"] for e in present}                              # de-bias
+        mu = sum(w[e] * g[e] for e in present)
+        var = self.kappa * sum(w[e] * (reg[e]["s2"] + (g[e] - mu) ** 2) for e in present)
+        return (mu, var)
 
-    def predict(self, key: str, values: dict[str, float]) -> float | None:
-        """Weighted combo over the experts present this round (renormalized)."""
-        w = self._region(key)["w"]
-        mask = self._present_mask(values)
-        if not mask.any():
-            return None
-        wm = w * mask
-        wm = wm / wm.sum()
-        f = np.array([values.get(e, 0.0) if mask[i] else 0.0 for i, e in enumerate(self.experts)])
-        return float((wm * f).sum())
+    def predict(self, key: str, values: dict) -> float | None:
+        return self.predict_dist(key, values)[0]
+
+    def weights(self, key: str) -> dict[str, float]:
+        """Display weights (inverse-variance over ALL experts at current variances)."""
+        reg = self._region(key)
+        inv = {e: 1.0 / max(reg[e]["s2"], self.s2_floor) for e in self.experts}
+        z = sum(inv.values())
+        return {e: inv[e] / z for e in self.experts}
 
     # ---- update ------------------------------------------------------------
-    def update(self, key: str, values: dict[str, float], truth: float) -> None:
-        """Pay loss for present experts and update the region's weights."""
-        st = self._region(key)
-        w = st["w"].copy()
-        mask = self._present_mask(values)
-        if not mask.any():
-            return
-        losses = np.zeros(self.n)
-        for i, e in enumerate(self.experts):
-            if mask[i]:
-                losses[i] = min(1.0, abs(values[e] - truth) / self.l_max)
-        # blend loss (for regret accounting), using the weights actually used
-        blend = self.predict(key, values)
-        if blend is not None:
-            st["cum_blend"] += min(1.0, abs(blend - truth) / self.l_max)
-        st["cum_loss"] += np.where(mask, losses, 0.0)
-        # multiplicative-weights step on present experts only
-        w[mask] *= np.exp(-self.eta * losses[mask])
-        w = w / w.sum()
-        # fixed-share: leak a little mass back to uniform so stale experts recover
-        w = (1.0 - self.alpha) * w + self.alpha / self.n
-        st["w"] = w
-        st["n"] += 1
-
-    def regret(self, key: str) -> float:
-        """Blend cumulative loss minus the best single expert's -- should stay small/negative."""
-        st = self._region(key)
-        return float(st["cum_blend"] - st["cum_loss"].min())
+    def update(self, key: str, values: dict, truth: float) -> None:
+        reg = self._region(key)
+        for e in self._present(values):
+            err = values[e] - truth
+            st = reg[e]
+            st["b"] += self.bias_lr * (err - st["b"])
+            resid = err - st["b"]
+            st["s2"] = max((1 - self.var_lr) * st["s2"] + self.var_lr * resid ** 2, self.s2_floor)
+            st["n"] += 1.0
 
     # ---- persistence -------------------------------------------------------
     def to_state(self) -> dict:
-        return {
-            "experts": self.experts, "eta": self.eta, "alpha": self.alpha, "l_max": self.l_max,
-            "regions": {
-                k: {"w": v["w"].tolist(), "n": v["n"],
-                    "cum_loss": v["cum_loss"].tolist(), "cum_blend": v["cum_blend"]}
-                for k, v in self._state.items()
-            },
-        }
+        return {"schema": "bma1", "experts": self.experts, "alpha": self.alpha,
+                "bias_lr": self.bias_lr, "var_lr": self.var_lr, "s2_floor": self.s2_floor,
+                "kappa": self.kappa, "priors": self.priors, "regions": self._state}
 
     @classmethod
     def from_state(cls, state: dict) -> "OnlineExpertBlend":
-        obj = cls(state["experts"], alpha=state["alpha"], l_max=state["l_max"], eta=state["eta"])
-        for k, v in state.get("regions", {}).items():
-            obj._state[k] = {
-                "w": np.array(v["w"], dtype=float), "n": int(v["n"]),
-                "cum_loss": np.array(v["cum_loss"], dtype=float), "cum_blend": float(v["cum_blend"]),
-            }
+        if state.get("schema") != "bma1":          # legacy (Hedge) state -> start fresh
+            raise ValueError("incompatible state schema")
+        obj = cls(state["experts"], alpha=state["alpha"], bias_lr=state["bias_lr"],
+                  var_lr=state["var_lr"], s2_floor=state["s2_floor"], kappa=state["kappa"],
+                  priors=state.get("priors"))
+        obj._state = {k: {e: dict(v) for e, v in reg.items()} for k, reg in state.get("regions", {}).items()}
         return obj

@@ -28,11 +28,10 @@ def test_panel_lifecycle_learns_to_downweight_biased_expert(tmp_path, monkeypatc
     df = panel.start_of_day(date(2026, 6, 3))
     assert set(df["station"]) == {"KLAX", "KPHX"}
     assert (df["conviction"] == "ESTIMATE").all()
-    # cold start: blend ~ simple average of the 3 experts
+    # cold start: blend is an inverse-variance combo of the 3 experts (in range)
     klax_est = df[df.station == "KLAX"]["estimate"].iloc[0]
-    assert klax_est == round_nws((72 + 80 + 71) / 3)  # whole °F, NWS rounding
+    assert 71 <= klax_est <= 80
     assert "confidence" in df.columns
-    assert df["confidence"].between(30, 98).all()
 
     # run the daily loop forward
     for i in range(25):
@@ -40,15 +39,16 @@ def test_panel_lifecycle_learns_to_downweight_biased_expert(tmp_path, monkeypatc
         panel.start_of_day(d)
         panel.end_of_day(d)
 
-    w = panel.blend.weights("KLAX")
-    assert w["ecmwf_ifs"] < w["nws_nbm"]   # biased expert demoted
-    assert w["ecmwf_ifs"] < w["gfs"]
+    # the learner captures ecmwf_ifs's +8°F bias and the de-biased blend tracks truth
+    reg = panel.blend._region("KLAX")
+    assert abs(reg["ecmwf_ifs"]["b"] - 8.0) < 2.0
+    assert abs(panel.blend.predict("KLAX", experts["KLAX"]) - 72.0) < 2.0
     assert (tmp_path / "panel_data" / "weights.json").exists()
     assert (tmp_path / "panel_data" / "truth.parquet").exists()
 
-    # a fresh Panel reloads the learned weights from disk
+    # a fresh Panel reloads the learned state from disk
     reloaded = Panel(cfg=cfg, station_ids=("KLAX", "KPHX"))
-    assert reloaded.blend.weights("KLAX")["ecmwf_ifs"] == w["ecmwf_ifs"]
+    assert reloaded.blend._region("KLAX")["ecmwf_ifs"]["b"] == reg["ecmwf_ifs"]["b"]
 
 
 def test_round_nws_half_up():

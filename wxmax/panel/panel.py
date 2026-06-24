@@ -30,8 +30,11 @@ from ..config import PANEL_STATIONS, Config, load_config
 from ..ingest import alerts_nws, forecasts_ecmwf, forecasts_nodd, obs_nws
 from ..ingest.truth_cli import fetch_cli_max
 from ..models.online_experts import OnlineExpertBlend
-from ..nowcast.hotspot import detect_high_conviction, model_remaining_rise
+from ..nowcast import peak_climatology
+from ..nowcast.confidence import decide_lock, peak_passed_confidence
+from ..nowcast.hotspot import model_remaining_rise
 from ..nowcast.obs_nowcast import intraday_nowcast
+from ..verify.calibrate_peak import load_calibration
 from ..stations import Station, load_stations
 from ..timeutil import to_local
 
@@ -175,6 +178,10 @@ class Panel:
         return out
 
     def hourly_poll(self, d: date) -> pd.DataFrame:
+        """Per tick: compute the calibrated P(daily max already occurred) for each
+        city; emit a TRACKING row (climbing confidence) or, once it clears 0.99 +
+        guards, a HIGH (locked) row. Only HIGH rows trigger the alert."""
+        calib = load_calibration(self.cfg)
         rows = []
         for st in self.stations:
             try:
@@ -190,25 +197,36 @@ class Panel:
                 continue
             obs_max, obs_now = float(obs["tmpf"].max()), float(obs["tmpf"].iloc[-1])
             now_hour = float(obs["hr"].iloc[-1])
+            hour_of_max = float(obs["hr"].iloc[int(np.argmax(obs["tmpf"].values))])
+            dwell_min = max(0.0, (now_hour - hour_of_max) * 60.0)   # mins since running max last set
+            drop = obs_max - obs_now
             try:
                 hf = obs_nws.fetch_hourly_forecast(st)
                 hl = to_local(hf["valid"], st.tz)
-                # Restrict to TODAY's local hours only -- otherwise "hours >= now"
-                # wrongly sweeps in tomorrow's peak and inflates the remaining rise.
+                # TODAY's local hours only, else "hours >= now" sweeps in tomorrow's peak.
                 today = [(t.hour + t.minute / 60, v) for t, v in zip(hl, hf["tmpf"]) if t.date() == d]
                 rise = (model_remaining_rise([h for h, _ in today], [v for _, v in today], now_hour)
                         if today else None)
             except Exception:
                 rise = None
-            conv = detect_high_conviction(st, d, now_hour, obs["hr"].tolist(), obs["tmpf"].tolist(), rise)
-            if not conv.high_conviction:
-                continue
-            nc = intraday_nowcast(obs_max, obs_now, rise, high_conviction=True)
+
+            clim = peak_climatology.load_or_build(st, d, self.cfg)
+            p_clim = clim.p_passed(now_hour)
+            conf = peak_passed_confidence(p_clim, dwell_min, drop, rise)
+            params = calib.get(st.id, {})
+            p99 = clim.pct(99)
+            p_lock = params.get("p_lock", float(p99) if p99 == p99 else 16.0)
+            dwell_floor = params.get("dwell_min", 90.0)
+            locked = decide_lock(conf, now_hour, p_lock, dwell_floor, rise, threshold=0.99)
+            nc = intraday_nowcast(obs_max, obs_now, rise, high_conviction=locked)
             rows.append({
-                "date": d.isoformat(), "station": st.id, "conviction": "HIGH",
+                "date": d.isoformat(), "station": st.id,
+                "conviction": "HIGH" if locked else "TRACKING",
                 "estimate": round_nws(nc.high), "lo": round_nws(nc.lo), "hi": round_nws(nc.hi),
-                "confidence": confidence_score((nc.hi - nc.lo) / 2.0),
-                "obs_max_so_far": round_nws(obs_max), "n_signals": conv.n_signals,
+                "peak_passed": round(conf, 3) if conf is not None else None,
+                "confidence": int(round(conf * 100)) if conf is not None else None,
+                "obs_max_so_far": round_nws(obs_max), "dwell_min": round(dwell_min),
+                "p_clim": round(p_clim, 3) if p_clim is not None else None,
             })
         if rows:
             self._append("estimates", rows, keys=["date", "station", "conviction"])

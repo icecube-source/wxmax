@@ -18,6 +18,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .. import store
@@ -42,6 +43,23 @@ def _conf_badge(c) -> str:
     return f"<span class='conf {cls}'>{c}%</span>"
 
 
+def _load_clim_stats(cfg: Config) -> dict:
+    """Per-station climatological peak-hour median/P90 from the cached JSONs."""
+    out, d = {}, cfg.panel_dir / "climatology"
+    for sid in PANEL_STATIONS:
+        p = d / f"{sid}.json"
+        if not p.exists():
+            continue
+        try:
+            j = json.loads(p.read_text())
+            arr = np.array((j.get("recent") or []) + (j.get("baseline") or []), dtype=float)
+            if len(arr):
+                out[sid] = {"median": float(np.percentile(arr, 50)), "p90": float(np.percentile(arr, 90))}
+        except Exception:
+            pass
+    return out
+
+
 def _fmt_date(daystr: str) -> str:
     try:
         dt = datetime.strptime(daystr, "%Y-%m-%d")
@@ -61,28 +79,31 @@ def _sparkline(vals: list[float], w: int = 90, h: int = 22) -> str:
             f"<polyline points='{pts}' fill='none' stroke='#d9480f' stroke-width='1.5'/></svg>")
 
 
-def _today_panel_rows(est: pd.DataFrame, names: dict) -> str:
+def _today_panel_rows(est: pd.DataFrame, names: dict, clim_stats: dict) -> str:
     if est.empty:
-        return "<tr><td colspan='4'>no panel data yet</td></tr>"
+        return "<tr><td colspan='6'>no panel data yet</td></tr>"
     day = est["date"].max()
+    order = {"HIGH": 0, "TRACKING": 1, "ESTIMATE": 2}  # show the most-resolved row
     rows = ""
     for sid in names:
         sub = est[(est.date == day) & (est.station == sid)]
         if sub.empty:
             continue
-        pick = sub[sub.conviction == "HIGH"]
-        pick = pick.iloc[0] if len(pick) else sub.iloc[0]
-        high = pick["conviction"] == "HIGH"
-        badge = (f"<span class='badge {'high' if high else 'est'}'>"
-                 f"{'HIGH CONVICTION' if high else 'estimate'}</span>")
+        pick = sub.assign(_o=sub["conviction"].map(lambda c: order.get(c, 3))).sort_values("_o").iloc[0]
+        conv = pick["conviction"]
+        label = {"HIGH": ("high", "HIGH CONVICTION"), "TRACKING": ("track", "tracking"),
+                 "ESTIMATE": ("est", "estimate")}.get(conv, ("est", str(conv).lower()))
+        badge = f"<span class='badge {label[0]}'>{label[1]}</span>"
         is_heat = bool("regime" in sub.columns and (sub["regime"] == "heat").any())
         heat = " <span class='heat' title='NWS heat alert active'>&#9888; HEAT</span>" if is_heat else ""
         val = pick.get("estimate")
         rng = f"[{pick['lo']:.0f}, {pick['hi']:.0f}]" if pd.notna(pick.get("lo")) else ""
+        cs = clim_stats.get(sid)
+        peak = f"{cs['median']:.0f}&ndash;{cs['p90']:.0f}h" if cs else "&mdash;"
         rows += (f"<tr><td>{names[sid]}{heat}</td><td class='num big'>{val:.0f}&deg;F</td>"
                  f"<td class='num'>{rng}</td><td>{_conf_badge(pick.get('confidence'))}</td>"
-                 f"<td>{badge}</td></tr>")
-    return rows or "<tr><td colspan='5'>no rows for latest day</td></tr>"
+                 f"<td class='num'>{peak}</td><td>{badge}</td></tr>")
+    return rows or "<tr><td colspan='6'>no rows for latest day</td></tr>"
 
 
 def _realized_section(truth: pd.DataFrame, names: dict) -> str:
@@ -155,6 +176,7 @@ def render(cfg: Config | None = None, generated_at: str | None = None,
     truth = _read(cfg.panel_dir / "truth.parquet")
     wpath = cfg.panel_dir / "weights.json"
     weights = json.loads(wpath.read_text()) if wpath.exists() else {}
+    clim_stats = _load_clim_stats(cfg)
     gen = generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     day = est["date"].max() if not est.empty else None
     date_str = _fmt_date(day) if day else "—"
@@ -181,6 +203,7 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 .badge {{ font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight:600; }}
 .badge.high {{ background:#e4f5e9; color:#1a7f37; }}
 .badge.est {{ background:#fdf3d8; color:#9a6700; }}
+.badge.track {{ background:#eef2ff; color:#3949ab; }}
 .conf {{ font-size:12px; font-weight:700; padding:2px 8px; border-radius:10px; }}
 .conf.high {{ background:#e4f5e9; color:#1a7f37; }}
 .conf.mid {{ background:#fdf3d8; color:#9a6700; }}
@@ -203,12 +226,12 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 <div class="sub">12 US cities &middot; ground truth = NWS Climatological Report (CLI) &middot; generated {gen}</div>
 
 <h2>Today's panel</h2>
-<table><tr><th>City</th><th class="num">Max &deg;F</th><th class="num">Interval</th><th>Confidence</th><th>Call</th></tr>
-{_today_panel_rows(est, names)}</table>
-<p class="cap">Confidence = forecast-interval tightness (expert agreement + conviction).
-HIGH-conviction means the daily peak has already passed, so the max is essentially locked.
-A <span class="heat">&#9888; HEAT</span> badge = active NWS heat alert: the estimate is nudged up,
-the upper tail widened, and confidence capped (models under-predict extremes).</p>
+<table><tr><th>City</th><th class="num">Max &deg;F</th><th class="num">Interval</th><th>Confidence</th><th class="num">Clim peak</th><th>Call</th></tr>
+{_today_panel_rows(est, names, clim_stats)}</table>
+<p class="cap">Confidence (intraday) = calibrated <b>P(daily max already occurred)</b> &mdash; it climbs through the
+afternoon; <b>tracking</b> &rarr; <b>HIGH</b> (locked) once it clears 99% with the peak past.
+Clim peak = this city's typical peak-hour window (median&ndash;P90, local) learned from its own history.
+A <span class="heat">&#9888; HEAT</span> badge = active NWS heat alert (estimate nudged up, upper tail widened, confidence capped).</p>
 
 <h2>Realized max temperature (NWS CLI) over time</h2>
 {_realized_section(truth, names)}

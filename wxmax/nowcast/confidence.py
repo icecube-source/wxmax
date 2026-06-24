@@ -43,9 +43,27 @@ def peak_passed_confidence(p_clim: float | None, dwell_min: float, drop_f: float
     return p_clim * p_traj(dwell_min, drop_f) * p_model(remaining_rise)
 
 
+def real_time_best(obs_max: float, obs_now: float, remaining_rise: float | None,
+                   morning_est: float | None, morning_half: float, p_passed: float,
+                   locked: bool) -> tuple[float, float, float]:
+    """Real-time best estimate of today's max + interval (best, lo, hi).
+
+    Starts at the forward forecast and converges to the realized max as the peak
+    passes (P->1). Always >= obs_max_so_far (the max can't be below what we've
+    seen). Locked -> the realized max with a tight band.
+    """
+    if locked:
+        return obs_max, obs_max, obs_max + 0.7
+    fwd = max(obs_max, obs_now + max(0.0, remaining_rise or 0.0),
+              morning_est if morning_est is not None else obs_max)
+    best = p_passed * obs_max + (1.0 - p_passed) * fwd
+    half = max(0.9, (1.0 - p_passed) * (morning_half or 5.0))
+    return best, max(obs_max, best - half), best + half
+
+
 def decide_lock(conf: float | None, now_hour: float, p_lock: float, dwell_min: float,
-                remaining_rise: float | None, threshold: float = 0.99,
-                dwell_floor: float = 90.0, rise_eps: float = 0.2) -> bool:
+                remaining_rise: float | None, threshold: float = 0.85,
+                dwell_floor: float = 40.0, rise_eps: float = 0.2) -> bool:
     """Lock only at >= threshold confidence AND all hard guards pass."""
     if conf is None:
         return False

@@ -26,9 +26,9 @@ from ..stations import load_stations
 from ..timeutil import to_local
 
 P_LOCK_GRID = [13.0, 13.5, 14.0, 14.5, 15.0, 15.5, 16.0, 16.5, 17.0, 17.5, 18.0, 18.5, 19.0]
-DWELL_GRID = [60.0, 90.0, 120.0]
-THRESHOLD = 0.99
-EARLY_BUDGET = 0.01
+DWELL_GRID = [30.0, 40.0, 45.0, 60.0, 90.0]
+THRESHOLD = 0.85
+EARLY_BUDGET = 0.06
 
 
 def _days(hourly: pd.DataFrame, tz: str, min_obs: int = 12):

@@ -79,30 +79,47 @@ def _sparkline(vals: list[float], w: int = 90, h: int = 22) -> str:
             f"<polyline points='{pts}' fill='none' stroke='#d9480f' stroke-width='1.5'/></svg>")
 
 
+def _val_cell(row) -> str:
+    if row is None or pd.isna(row.get("estimate")):
+        return "&mdash;"
+    rng = (f" <span class='rng'>[{row['lo']:.0f}, {row['hi']:.0f}]</span>"
+           if pd.notna(row.get("lo")) else "")
+    return f"<b>{row['estimate']:.0f}&deg;F</b>{rng}"
+
+
 def _today_panel_rows(est: pd.DataFrame, names: dict, clim_stats: dict) -> str:
     if est.empty:
         return "<tr><td colspan='6'>no panel data yet</td></tr>"
     day = est["date"].max()
-    order = {"HIGH": 0, "TRACKING": 1, "ESTIMATE": 2}  # show the most-resolved row
     rows = ""
     for sid in names:
         sub = est[(est.date == day) & (est.station == sid)]
         if sub.empty:
             continue
-        pick = sub.assign(_o=sub["conviction"].map(lambda c: order.get(c, 3))).sort_values("_o").iloc[0]
-        conv = pick["conviction"]
-        label = {"HIGH": ("high", "HIGH CONVICTION"), "TRACKING": ("track", "tracking"),
-                 "ESTIMATE": ("est", "estimate")}.get(conv, ("est", str(conv).lower()))
+        m = sub[sub.conviction == "ESTIMATE"]              # static morning estimate
+        m = m.iloc[0] if len(m) else None
+        intr = sub[sub.conviction.isin(["HIGH", "TRACKING"])]  # live real-time best
+        if len(intr):
+            intr = intr.assign(_o=intr["conviction"].map({"HIGH": 0, "TRACKING": 1})).sort_values("_o")
+            rt = intr.iloc[0]
+        else:
+            rt = None
+        if rt is not None:
+            locked = rt["conviction"] == "HIGH"
+            rt_cell = _val_cell(rt) + (" <span class='lock'>&#128274;</span>" if locked else "")
+            conf = _conf_badge(rt.get("confidence"))
+            label = ("high", "LOCKED") if locked else ("track", "tracking")
+        else:
+            rt_cell = "&mdash;"
+            conf = _conf_badge(m.get("confidence")) if m is not None else ""
+            label = ("est", "estimate")
         badge = f"<span class='badge {label[0]}'>{label[1]}</span>"
         is_heat = bool("regime" in sub.columns and (sub["regime"] == "heat").any())
         heat = " <span class='heat' title='NWS heat alert active'>&#9888; HEAT</span>" if is_heat else ""
-        val = pick.get("estimate")
-        rng = f"[{pick['lo']:.0f}, {pick['hi']:.0f}]" if pd.notna(pick.get("lo")) else ""
         cs = clim_stats.get(sid)
         peak = f"{cs['median']:.0f}&ndash;{cs['p90']:.0f}h" if cs else "&mdash;"
-        rows += (f"<tr><td>{names[sid]}{heat}</td><td class='num big'>{val:.0f}&deg;F</td>"
-                 f"<td class='num'>{rng}</td><td>{_conf_badge(pick.get('confidence'))}</td>"
-                 f"<td class='num'>{peak}</td><td>{badge}</td></tr>")
+        rows += (f"<tr><td>{names[sid]}{heat}</td><td>{_val_cell(m)}</td><td>{rt_cell}</td>"
+                 f"<td>{conf}</td><td class='num'>{peak}</td><td>{badge}</td></tr>")
     return rows or "<tr><td colspan='6'>no rows for latest day</td></tr>"
 
 
@@ -204,6 +221,8 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 .badge.high {{ background:#e4f5e9; color:#1a7f37; }}
 .badge.est {{ background:#fdf3d8; color:#9a6700; }}
 .badge.track {{ background:#eef2ff; color:#3949ab; }}
+.rng {{ color:#6b7280; font-size:12px; font-weight:400; }}
+.lock {{ color:#1a7f37; }}
 .conf {{ font-size:12px; font-weight:700; padding:2px 8px; border-radius:10px; }}
 .conf.high {{ background:#e4f5e9; color:#1a7f37; }}
 .conf.mid {{ background:#fdf3d8; color:#9a6700; }}
@@ -226,12 +245,14 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 <div class="sub">12 US cities &middot; ground truth = NWS Climatological Report (CLI) &middot; generated {gen}</div>
 
 <h2>Today's panel</h2>
-<table><tr><th>City</th><th class="num">Max &deg;F</th><th class="num">Interval</th><th>Confidence</th><th class="num">Clim peak</th><th>Call</th></tr>
+<table><tr><th>City</th><th>Morning est</th><th>Real-time best</th><th>Confidence</th><th class="num">Clim peak</th><th>Call</th></tr>
 {_today_panel_rows(est, names, clim_stats)}</table>
-<p class="cap">Confidence (intraday) = calibrated <b>P(daily max already occurred)</b> &mdash; it climbs through the
-afternoon; <b>tracking</b> &rarr; <b>HIGH</b> (locked) once it clears 99% with the peak past.
-Clim peak = this city's typical peak-hour window (median&ndash;P90, local) learned from its own history.
-A <span class="heat">&#9888; HEAT</span> badge = active NWS heat alert (estimate nudged up, upper tail widened, confidence capped).</p>
+<p class="cap"><b>Morning est</b> = the static begin-of-day forecast (fixed all day).
+<b>Real-time best</b> = the live best estimate of today's max &mdash; it updates every few minutes and
+converges to the realized max as the peak passes; <span class="lock">&#128274;</span> = LOCKED.
+<b>Confidence</b> = calibrated P(daily max already occurred), climbing through the afternoon (locks at 85%).
+<b>Clim peak</b> = this city's typical peak-hour window (median&ndash;P90, local) from its own history.
+<span class="heat">&#9888; HEAT</span> = active NWS heat alert.</p>
 
 <h2>Realized max temperature (NWS CLI) over time</h2>
 {_realized_section(truth, names)}

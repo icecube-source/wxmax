@@ -65,6 +65,10 @@ class Config:
     # repo, not in the gitignored R&D `data/` dir.
     panel_dir: Path = REPO_ROOT / "panel_data"
     docs_dir: Path = REPO_ROOT / "docs"
+    # Intraday lock: how sure P(daily max already occurred) must be before locking.
+    # 0.85 = "Earlier" profile (locks sooner; ~5-8% may lock before the true peak).
+    lock_threshold: float = 0.85
+    early_lock_budget: float = 0.06   # back-test target for locked-before-true-peak
 
     @property
     def obs_dir(self) -> Path:

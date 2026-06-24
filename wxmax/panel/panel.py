@@ -31,9 +31,8 @@ from ..ingest import alerts_nws, forecasts_ecmwf, forecasts_nodd, obs_nws
 from ..ingest.truth_cli import fetch_cli_max
 from ..models.online_experts import OnlineExpertBlend
 from ..nowcast import peak_climatology
-from ..nowcast.confidence import decide_lock, peak_passed_confidence
+from ..nowcast.confidence import decide_lock, peak_passed_confidence, real_time_best
 from ..nowcast.hotspot import model_remaining_rise
-from ..nowcast.obs_nowcast import intraday_nowcast
 from ..verify.calibrate_peak import load_calibration
 from ..stations import Station, load_stations
 from ..timeutil import to_local
@@ -178,10 +177,12 @@ class Panel:
         return out
 
     def hourly_poll(self, d: date) -> pd.DataFrame:
-        """Per tick: compute the calibrated P(daily max already occurred) for each
-        city; emit a TRACKING row (climbing confidence) or, once it clears 0.99 +
-        guards, a HIGH (locked) row. Only HIGH rows trigger the alert."""
+        """Per tick: compute P(daily max already occurred) and a real-time best
+        estimate of today's max for each city. Emits a TRACKING row (climbing
+        confidence) or, once confidence clears the lock threshold + guards, a HIGH
+        (locked) row. Only HIGH rows trigger the alert."""
         calib = load_calibration(self.cfg)
+        morning = self._morning_estimates(d)
         rows = []
         for st in self.stations:
             try:
@@ -216,21 +217,39 @@ class Panel:
             params = calib.get(st.id, {})
             p99 = clim.pct(99)
             p_lock = params.get("p_lock", float(p99) if p99 == p99 else 16.0)
-            dwell_floor = params.get("dwell_min", 90.0)
-            locked = decide_lock(conf, now_hour, p_lock, dwell_floor, rise, threshold=0.99)
-            nc = intraday_nowcast(obs_max, obs_now, rise, high_conviction=locked)
+            dwell_floor = params.get("dwell_min", 40.0)
+            locked = decide_lock(conf, now_hour, p_lock, dwell_floor, rise,
+                                 threshold=self.cfg.lock_threshold)
+            p = conf or 0.0
+            m_est, m_half = morning.get(st.id, (None, 5.0))
+            rt_best, rt_lo, rt_hi = real_time_best(obs_max, obs_now, rise, m_est, m_half, p, locked)
             rows.append({
                 "date": d.isoformat(), "station": st.id,
                 "conviction": "HIGH" if locked else "TRACKING",
-                "estimate": round_nws(nc.high), "lo": round_nws(nc.lo), "hi": round_nws(nc.hi),
-                "peak_passed": round(conf, 3) if conf is not None else None,
-                "confidence": int(round(conf * 100)) if conf is not None else None,
+                "estimate": round_nws(rt_best), "lo": round_nws(rt_lo), "hi": round_nws(rt_hi),
+                "peak_passed": round(p, 3),
+                "confidence": int(round(p * 100)),
                 "obs_max_so_far": round_nws(obs_max), "dwell_min": round(dwell_min),
                 "p_clim": round(p_clim, 3) if p_clim is not None else None,
             })
         if rows:
             self._append("estimates", rows, keys=["date", "station", "conviction"])
         return pd.DataFrame(rows)
+
+    def _morning_estimates(self, d: date) -> dict:
+        """{station: (estimate, half_width)} from today's start-of-day ESTIMATE rows."""
+        path = self.dir / "estimates.parquet"
+        out: dict = {}
+        if not path.exists():
+            return out
+        df = store.read_parquet(path)
+        df = df[(df["date"] == d.isoformat()) & (df["conviction"] == "ESTIMATE")]
+        for _, r in df.iterrows():
+            if pd.notna(r.get("estimate")):
+                half = ((float(r["hi"]) - float(r["lo"])) / 2.0
+                        if pd.notna(r.get("lo")) and pd.notna(r.get("hi")) else 5.0)
+                out[r["station"]] = (float(r["estimate"]), half)
+        return out
 
     def end_of_day(self, d: date, expert_values: dict[str, dict[str, float]] | None = None) -> pd.DataFrame:
         """Record official CLI truth and update each station's expert weights."""

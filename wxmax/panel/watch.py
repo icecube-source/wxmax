@@ -102,7 +102,7 @@ def tick(panel: Panel, names: dict, alerted: set, browser_refresh: int, alert_ba
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Continuous wxmax panel watcher + alerter.")
-    ap.add_argument("--interval", type=int, default=900, help="seconds between data ticks (default 900 = 15 min)")
+    ap.add_argument("--interval", type=int, default=300, help="seconds between data ticks (default 300 = 5 min)")
     ap.add_argument("--browser-refresh", type=int, default=60, dest="browser_refresh",
                     help="seconds for the dashboard's browser auto-refresh (default 60)")
     ap.add_argument("--serve", type=int, default=0, help="serve dashboard on this port (0 = off)")

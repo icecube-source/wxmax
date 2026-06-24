@@ -42,3 +42,5 @@ def test_dashboard_renders(tmp_path, monkeypatch):
     assert "Confidence" in html                # confidence column
     assert "mean absolute error" in html       # MAE caption
     assert 'http-equiv="refresh"' in html      # auto-refresh
+    assert "Morning est" in html               # static morning column
+    assert "Real-time best" in html            # live real-time column

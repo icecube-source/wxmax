@@ -10,11 +10,14 @@ __pycache__/
 venv/
 env/
 
-# Local R&D data / caches (forecasts, obs, feature store).
-# NOTE: panel_data/ (committed panel state) and docs/ (dashboard) are tracked.
+# Local R&D data/caches + the live panel's runtime state + dashboard.
+# The panel now lives ONLY on the local machine (no GitHub Pages / cloud cron),
+# so its state and rendered dashboard are untracked.
 data/
 data/*.parquet
 data/*.duckdb
+panel_data/
+docs/
 
 # Secrets — never commit API keys
 .env

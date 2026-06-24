@@ -26,7 +26,7 @@ import pandas as pd
 
 from .. import store
 from ..config import PANEL_STATIONS, Config, load_config
-from ..ingest import forecasts_ecmwf, forecasts_nodd, obs_nws
+from ..ingest import alerts_nws, forecasts_ecmwf, forecasts_nodd, obs_nws
 from ..ingest.truth_cli import fetch_cli_max
 from ..models.online_experts import OnlineExpertBlend
 from ..nowcast.hotspot import detect_high_conviction, model_remaining_rise
@@ -47,6 +47,18 @@ def confidence_score(half_width: float) -> int:
     -- it's a monotone, interpretable tightness score (capped 30-98).
     """
     return int(round(max(30.0, min(98.0, 100.0 - 7.5 * half_width))))
+
+
+# --- heat-regime (Tier 1) adjustment ---------------------------------------
+HEAT_BIAS_F = 1.5       # models under-shoot extremes -> nudge the point up
+HEAT_HEADROOM_F = 3.0   # extra UPPER-tail headroom (asymmetric: risk is on the hot side)
+HEAT_CONF_CAP = 70      # tight model agreement != accuracy in the tail -> cap confidence
+
+
+def apply_heat_regime(point: float, half: float, conf: int) -> tuple[float, float, float, int]:
+    """Adjust an ESTIMATE when an active heat alert puts a city in the extreme tail."""
+    p = point + HEAT_BIAS_F
+    return p, p - half, p + half + HEAT_HEADROOM_F, min(conf, HEAT_CONF_CAP)
 
 
 class Panel:
@@ -109,6 +121,7 @@ class Panel:
     # ---- lifecycle ---------------------------------------------------------
     def start_of_day(self, d: date) -> pd.DataFrame:
         experts = self.gather_experts(d)
+        heat = self._gather_heat()                       # real-time NWS heat alerts
         rows = []
         for st in self.stations:
             ev = experts[st.id]
@@ -118,12 +131,20 @@ class Panel:
             vals = list(ev.values())
             spread = float(np.std(vals)) if len(vals) >= 2 else 0.0
             half = min(10.0, max(1.5, 1.0 + 1.25 * spread))
+            point, lo, hi, conf, regime, event = est, None, None, None, "normal", None
+            if est is not None:
+                lo, hi, conf = est - half, est + half, confidence_score(half)
+                h = heat.get(st.id)
+                if h is not None:  # extreme-tail regime: skew up + cap confidence
+                    point, lo, hi, conf = apply_heat_regime(est, half, conf)
+                    regime, event = "heat", h.event
             rows.append({
                 "date": d.isoformat(), "station": st.id, "conviction": "ESTIMATE",
-                "estimate": round(est, 1) if est is not None else None,
-                "lo": round(est - half, 1) if est is not None else None,
-                "hi": round(est + half, 1) if est is not None else None,
-                "confidence": confidence_score(half) if est is not None else None,
+                "estimate": round(point, 1) if point is not None else None,
+                "lo": round(lo, 1) if lo is not None else None,
+                "hi": round(hi, 1) if hi is not None else None,
+                "confidence": conf,
+                "regime": regime, "alert_event": event,
                 "spread": round(spread, 1),
                 "n_experts": len(ev),
                 **{f"x_{k}": round(v, 1) for k, v in ev.items()},
@@ -131,6 +152,18 @@ class Panel:
             })
         self._append("estimates", rows, keys=["date", "station", "conviction"])
         return pd.DataFrame(rows)
+
+    def _gather_heat(self) -> dict:
+        """Active NWS heat alert per station (best-effort; one bad call is skipped)."""
+        out = {}
+        for st in self.stations:
+            try:
+                h = alerts_nws.fetch_active_heat(st)
+                if h is not None:
+                    out[st.id] = h
+            except Exception:
+                pass
+        return out
 
     def hourly_poll(self, d: date) -> pd.DataFrame:
         rows = []

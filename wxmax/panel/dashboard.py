@@ -75,9 +75,11 @@ def _today_panel_rows(est: pd.DataFrame, names: dict) -> str:
         high = pick["conviction"] == "HIGH"
         badge = (f"<span class='badge {'high' if high else 'est'}'>"
                  f"{'HIGH CONVICTION' if high else 'estimate'}</span>")
+        is_heat = bool("regime" in sub.columns and (sub["regime"] == "heat").any())
+        heat = " <span class='heat' title='NWS heat alert active'>&#9888; HEAT</span>" if is_heat else ""
         val = pick.get("estimate")
         rng = f"[{pick['lo']:.0f}, {pick['hi']:.0f}]" if pd.notna(pick.get("lo")) else ""
-        rows += (f"<tr><td>{names[sid]}</td><td class='num big'>{val:.0f}&deg;F</td>"
+        rows += (f"<tr><td>{names[sid]}{heat}</td><td class='num big'>{val:.0f}&deg;F</td>"
                  f"<td class='num'>{rng}</td><td>{_conf_badge(pick.get('confidence'))}</td>"
                  f"<td>{badge}</td></tr>")
     return rows or "<tr><td colspan='5'>no rows for latest day</td></tr>"
@@ -183,6 +185,7 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 .conf.high {{ background:#e4f5e9; color:#1a7f37; }}
 .conf.mid {{ background:#fdf3d8; color:#9a6700; }}
 .conf.low {{ background:#fde8e8; color:#b42318; }}
+.heat {{ font-size:11px; font-weight:700; padding:2px 6px; border-radius:8px; background:#fde8e8; color:#b42318; }}
 .cap {{ font-size:12px; color:#6b7280; margin:6px 2px 0; }}
 .wrow {{ margin: 6px 0; }}
 .wlabel {{ font-size: 13px; margin-bottom: 3px; }}
@@ -203,7 +206,9 @@ th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 <table><tr><th>City</th><th class="num">Max &deg;F</th><th class="num">Interval</th><th>Confidence</th><th>Call</th></tr>
 {_today_panel_rows(est, names)}</table>
 <p class="cap">Confidence = forecast-interval tightness (expert agreement + conviction).
-HIGH-conviction means the daily peak has already passed, so the max is essentially locked.</p>
+HIGH-conviction means the daily peak has already passed, so the max is essentially locked.
+A <span class="heat">&#9888; HEAT</span> badge = active NWS heat alert: the estimate is nudged up,
+the upper tail widened, and confidence capped (models under-predict extremes).</p>
 
 <h2>Realized max temperature (NWS CLI) over time</h2>
 {_realized_section(truth, names)}

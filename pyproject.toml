@@ -26,6 +26,15 @@ models = [
 ]
 # Live serving (P7).
 serve = ["fastapi>=0.110", "uvicorn>=0.29"]
+# Production panel: GRIB forecast experts (ECMWF Open Data + NOAA NODD via Herbie).
+panel = [
+    "herbie-data>=2024.1",
+    "cfgrib>=0.9",
+    "eccodes",
+    "ecmwflibs",
+    "ecmwf-opendata>=0.3",
+    "xarray>=2024.1",
+]
 dev = ["pytest>=8.0"]
 
 [tool.setuptools.packages.find]

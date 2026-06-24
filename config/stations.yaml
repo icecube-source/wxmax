@@ -122,3 +122,36 @@ stations:
     tz: America/New_York
     region: coastal_northeast
     coastal: true
+  # --- added for the production panel (the 11-city universe) ---
+  - id: KNYC
+    name: New York Central Park (climate station)
+    lat: 40.7789
+    lon: -73.9692
+    elevation_m: 40
+    tz: America/New_York
+    region: northeast_urban
+    coastal: false
+  - id: KAUS
+    name: Austin-Bergstrom Intl
+    lat: 30.1975
+    lon: -97.6664
+    elevation_m: 150
+    tz: America/Chicago
+    region: south_central
+    coastal: false
+  - id: KDCA
+    name: Reagan National (official Washington DC site)
+    lat: 38.8512
+    lon: -77.0402
+    elevation_m: 5
+    tz: America/New_York
+    region: mid_atlantic
+    coastal: false
+  - id: KMSY
+    name: New Orleans Louis Armstrong Intl
+    lat: 29.9934
+    lon: -90.2580
+    elevation_m: 1
+    tz: America/Chicago
+    region: gulf_coast
+    coastal: true

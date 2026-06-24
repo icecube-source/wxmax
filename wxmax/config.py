@@ -32,6 +32,22 @@ DEFAULT_QUANTILES: tuple[float, ...] = (
     0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95,
 )
 
+# The production panel's fixed universe (the ONLY locations it serves).
+# Ground truth for each is the NWS Climatological Report (CLI) daily max.
+PANEL_STATIONS: tuple[str, ...] = (
+    "KSEA",  # Seattle
+    "KSFO",  # San Francisco
+    "KPHX",  # Phoenix
+    "KLAX",  # Los Angeles
+    "KNYC",  # New York Central Park (climate station, not an airport)
+    "KLAS",  # Las Vegas
+    "KMIA",  # Miami
+    "KAUS",  # Austin-Bergstrom
+    "KDCA",  # Washington DC (Reagan National — official DC site)
+    "KMSY",  # New Orleans
+    "KDEN",  # Denver
+)
+
 
 @dataclass(frozen=True)
 class Config:
@@ -43,6 +59,11 @@ class Config:
     # Open-Meteo: free (non-commercial) host by default. For the commercial
     # fund product, set base host to customer-api.open-meteo.com + api key.
     openmeteo_api_key: str | None = None
+    # Committed (version-controlled) panel state + published dashboard. GitHub
+    # Actions runners are ephemeral, so the panel's weights/history live in the
+    # repo, not in the gitignored R&D `data/` dir.
+    panel_dir: Path = REPO_ROOT / "panel_data"
+    docs_dir: Path = REPO_ROOT / "docs"
 
     @property
     def obs_dir(self) -> Path:
@@ -53,7 +74,7 @@ class Config:
         return self.data_dir / "forecast"
 
     def ensure_dirs(self) -> None:
-        for d in (self.data_dir, self.obs_dir, self.forecast_dir):
+        for d in (self.data_dir, self.obs_dir, self.forecast_dir, self.panel_dir, self.docs_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

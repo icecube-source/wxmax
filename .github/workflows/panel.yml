@@ -1,0 +1,62 @@
+name: panel
+
+# Long-running daily max-temp panel. State (panel_data/) and dashboard (docs/)
+# are committed back to the repo each run, since GitHub Actions runners are
+# ephemeral. All data sources are free / public-domain -> no secrets needed.
+
+on:
+  schedule:
+    - cron: "0 13 * * *"   # ~morning US: start-of-day estimates + record yesterday's CLI truth
+    - cron: "0 21 * * *"   # ~afternoon/evening US: high-conviction poll
+  workflow_dispatch:
+    inputs:
+      phases:
+        description: "Comma list of phases (start,poll,end)"
+        default: "start,poll,end"
+
+permissions:
+  contents: write          # allow committing updated state + dashboard
+
+concurrency:               # never let two runs race on the committed state
+  group: panel
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[panel]"
+
+      - name: Pick phases
+        id: p
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "phases=${{ github.event.inputs.phases }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 21 * * *" ]; then
+            echo "phases=poll" >> "$GITHUB_OUTPUT"
+          else
+            echo "phases=start,end" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run panel
+        run: python -m wxmax.panel.run --phases "${{ steps.p.outputs.phases }}"
+
+      - name: Commit state + dashboard
+        run: |
+          git config user.name "wxmax-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add panel_data docs
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+          else
+            git commit -m "panel: ${{ steps.p.outputs.phases }} $(date -u +%FT%TZ)"
+            git push
+          fi

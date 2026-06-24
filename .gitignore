@@ -10,10 +10,11 @@ __pycache__/
 venv/
 env/
 
-# Local data / caches (forecasts, obs, feature store)
+# Local R&D data / caches (forecasts, obs, feature store).
+# NOTE: panel_data/ (committed panel state) and docs/ (dashboard) are tracked.
 data/
-*.parquet
-*.duckdb
+data/*.parquet
+data/*.duckdb
 
 # Secrets — never commit API keys
 .env

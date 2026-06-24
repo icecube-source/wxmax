@@ -1,14 +1,16 @@
 """Render a self-contained static HTML dashboard from the panel's Parquet store.
 
-Three sections:
-  1. Today's panel  -- per city: current call (HIGH conviction if the peak has
-     passed, else morning ESTIMATE), value, and interval.
-  2. Forecast accuracy vs NWS CLI -- MAE of the morning ESTIMATE against the
-     official daily max, per station and overall (the real forecast skill;
-     HIGH-conviction values are excluded since they're obs-anchored).
-  3. Per-region expert weights -- the online learner's current source mix.
+Sections:
+  1. Today's panel        -- per city: current call (HIGH conviction if the peak
+     has passed, else morning ESTIMATE), value, interval.
+  2. Realized max over time -- the recorded NWS CLI official daily max per city
+     across the available history, with a sparkline trend.
+  3. Forecast accuracy vs CLI -- MAE of the morning ESTIMATE per station/overall.
+  4. Per-region expert weights -- the online learner's current source mix
+     (collapsible).
 
-No external assets; writes cfg.docs_dir/index.html (servable via GitHub Pages).
+Light themed; today's date in the header. No external assets; writes
+cfg.docs_dir/index.html (servable via GitHub Pages).
 """
 from __future__ import annotations
 
@@ -32,26 +34,64 @@ def _read(path: Path) -> pd.DataFrame:
     return store.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
+def _fmt_date(daystr: str) -> str:
+    try:
+        dt = datetime.strptime(daystr, "%Y-%m-%d")
+        return f"{dt:%A, %B} {dt.day}, {dt.year}"
+    except Exception:
+        return daystr
+
+
+def _sparkline(vals: list[float], w: int = 90, h: int = 22) -> str:
+    if len(vals) < 2:
+        return ""
+    lo, hi = min(vals), max(vals)
+    rng = (hi - lo) or 1.0
+    n = len(vals)
+    pts = " ".join(f"{i/(n-1)*w:.1f},{h-2-(v-lo)/rng*(h-4):.1f}" for i, v in enumerate(vals))
+    return (f"<svg width='{w}' height='{h}' viewBox='0 0 {w} {h}'>"
+            f"<polyline points='{pts}' fill='none' stroke='#d9480f' stroke-width='1.5'/></svg>")
+
+
 def _today_panel_rows(est: pd.DataFrame, names: dict) -> str:
     if est.empty:
         return "<tr><td colspan='4'>no panel data yet</td></tr>"
     day = est["date"].max()
     rows = ""
-    for sid in [s for s in names]:
+    for sid in names:
         sub = est[(est.date == day) & (est.station == sid)]
         if sub.empty:
             continue
         pick = sub[sub.conviction == "HIGH"]
         pick = pick.iloc[0] if len(pick) else sub.iloc[0]
-        high_conv = pick["conviction"] == "HIGH"
-        badge = (f"<span class='badge {'high' if high_conv else 'est'}'>"
-                 f"{'HIGH CONVICTION' if high_conv else 'estimate'}</span>")
+        high = pick["conviction"] == "HIGH"
+        badge = (f"<span class='badge {'high' if high else 'est'}'>"
+                 f"{'HIGH CONVICTION' if high else 'estimate'}</span>")
         val = pick.get("estimate")
-        rng = (f"[{pick['lo']:.0f}, {pick['hi']:.0f}]"
-               if pd.notna(pick.get("lo")) else "")
-        rows += (f"<tr><td>{names[sid]}</td><td class='num big'>"
-                 f"{val:.0f}&deg;F</td><td class='num'>{rng}</td><td>{badge}</td></tr>")
+        rng = f"[{pick['lo']:.0f}, {pick['hi']:.0f}]" if pd.notna(pick.get("lo")) else ""
+        rows += (f"<tr><td>{names[sid]}</td><td class='num big'>{val:.0f}&deg;F</td>"
+                 f"<td class='num'>{rng}</td><td>{badge}</td></tr>")
     return rows or "<tr><td colspan='4'>no rows for latest day</td></tr>"
+
+
+def _realized_section(truth: pd.DataFrame, names: dict) -> str:
+    t = truth.dropna(subset=["cli_max_f"]) if not truth.empty else truth
+    if t.empty:
+        return "<p class='muted'>realized maxima populate as the official CLI reports are recorded.</p>"
+    piv = t.pivot_table(index="station", columns="date", values="cli_max_f", aggfunc="last")
+    dates = sorted(piv.columns)[-10:]  # most recent ~10 days
+    head = "".join(f"<th class='num'>{d[5:]}</th>" for d in dates)  # MM-DD
+    body = ""
+    for sid in names:
+        if sid not in piv.index:
+            continue
+        vals = [piv.loc[sid, d] if d in piv.columns else float("nan") for d in dates]
+        present = [v for v in vals if pd.notna(v)]
+        cells = "".join(
+            f"<td class='num'>{v:.0f}</td>" if pd.notna(v) else "<td class='num muted'>&middot;</td>"
+            for v in vals)
+        body += f"<tr><td>{names[sid]}</td><td>{_sparkline(present)}</td>{cells}</tr>"
+    return (f"<table><tr><th>City</th><th>Trend</th>{head}</tr>{body}</table>")
 
 
 def _accuracy_rows(est: pd.DataFrame, truth: pd.DataFrame, names: dict) -> str:
@@ -61,13 +101,12 @@ def _accuracy_rows(est: pd.DataFrame, truth: pd.DataFrame, names: dict) -> str:
     t = truth.dropna(subset=["cli_max_f"])[["date", "station", "cli_max_f"]]
     m = fc.merge(t, on=["date", "station"])
     if m.empty:
-        return "<tr><td colspan='3'>accuracy populates once forecasts & truth overlap</td></tr>"
+        return "<tr><td colspan='3'>accuracy populates once forecasts &amp; truth overlap</td></tr>"
     m["abs_err"] = (m["estimate"] - m["cli_max_f"]).abs()
     g = m.groupby("station")["abs_err"].agg(["mean", "count"]).sort_values("mean")
-    rows = ""
-    for sid, r in g.iterrows():
-        rows += (f"<tr><td>{names.get(sid, sid)}</td><td class='num'>{r['mean']:.2f}</td>"
-                 f"<td class='num'>{int(r['count'])}</td></tr>")
+    rows = "".join(
+        f"<tr><td>{names.get(sid, sid)}</td><td class='num'>{r['mean']:.2f}</td>"
+        f"<td class='num'>{int(r['count'])}</td></tr>" for sid, r in g.iterrows())
     rows += (f"<tr class='total'><td>ALL</td><td class='num'>{m['abs_err'].mean():.2f}</td>"
              f"<td class='num'>{len(m)}</td></tr>")
     return rows
@@ -83,11 +122,9 @@ def _weight_bars(weights: dict, names: dict) -> str:
         r = regions.get(sid)
         if not r:
             continue
-        segs = ""
-        for e, w in zip(experts, r["w"]):
-            c = EXPERT_COLORS.get(e, "#888")
-            segs += (f"<div class='seg' style='width:{w*100:.1f}%;background:{c}' "
-                     f"title='{e}: {w:.2f}'></div>")
+        segs = "".join(
+            f"<div class='seg' style='width:{w*100:.1f}%;background:{EXPERT_COLORS.get(e,'#888')}' "
+            f"title='{e}: {w:.2f}'></div>" for e, w in zip(experts, r["w"]))
         out += (f"<div class='wrow'><div class='wlabel'>{names[sid]}"
                 f"<span class='muted'> &middot; {r['n']} updates</span></div>"
                 f"<div class='bar'>{segs}</div></div>")
@@ -107,52 +144,71 @@ def render(cfg: Config | None = None, generated_at: str | None = None) -> Path:
     wpath = cfg.panel_dir / "weights.json"
     weights = json.loads(wpath.read_text()) if wpath.exists() else {}
     gen = generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    day = est["date"].max() if not est.empty else "—"
+    day = est["date"].max() if not est.empty else None
+    date_str = _fmt_date(day) if day else "—"
 
     html = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>wxmax daily max-temp panel</title>
 <style>
-:root {{ color-scheme: light dark; }}
-body {{ font-family: -apple-system, system-ui, sans-serif; margin: 0; background:#0f1115; color:#e6e6e6; }}
-.wrap {{ max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }}
+body {{ font-family: -apple-system, system-ui, sans-serif; margin: 0; background:#f7f8fa; color:#1a1d21; }}
+.wrap {{ max-width: 880px; margin: 0 auto; padding: 24px 16px 64px; }}
 h1 {{ font-size: 22px; margin: 0 0 2px; }}
-.sub {{ color:#9aa0aa; font-size: 13px; margin-bottom: 24px; }}
-h2 {{ font-size: 15px; text-transform: uppercase; letter-spacing:.06em; color:#9aa0aa; margin: 28px 0 8px; }}
-table {{ width:100%; border-collapse: collapse; font-size: 14px; }}
-td, th {{ padding: 7px 10px; border-bottom: 1px solid #232733; text-align:left; }}
+.today {{ font-size: 15px; font-weight: 600; color:#0b3d91; margin: 2px 0; }}
+.sub {{ color:#6b7280; font-size: 13px; margin-bottom: 20px; }}
+h2 {{ font-size: 14px; text-transform: uppercase; letter-spacing:.06em; color:#6b7280;
+     margin: 30px 0 8px; display:flex; align-items:center; gap:10px; }}
+table {{ width:100%; border-collapse: collapse; font-size: 14px; background:#fff;
+        border:1px solid #e3e6ea; border-radius:8px; overflow:hidden; }}
+td, th {{ padding: 7px 10px; border-bottom: 1px solid #eef0f3; text-align:left; }}
+th {{ background:#f1f3f6; color:#444; font-weight:600; }}
 .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
-.big {{ font-size: 17px; font-weight: 600; }}
-.total td {{ font-weight: 700; border-top: 2px solid #333; }}
+.big {{ font-size: 17px; font-weight: 700; }}
+.total td {{ font-weight: 700; background:#f1f3f6; }}
 .badge {{ font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight:600; }}
-.badge.high {{ background:#0b3d1e; color:#3fb950; }}
-.badge.est {{ background:#3a2f08; color:#d4a72c; }}
+.badge.high {{ background:#e4f5e9; color:#1a7f37; }}
+.badge.est {{ background:#fdf3d8; color:#9a6700; }}
 .wrow {{ margin: 6px 0; }}
 .wlabel {{ font-size: 13px; margin-bottom: 3px; }}
-.bar {{ display:flex; height: 14px; border-radius: 4px; overflow:hidden; background:#232733; }}
+.bar {{ display:flex; height: 14px; border-radius: 4px; overflow:hidden; background:#e3e6ea; }}
 .seg {{ height:100%; }}
 .muted {{ color:#9aa0aa; font-weight: 400; }}
-.legend {{ margin-top: 12px; font-size: 12px; color:#9aa0aa; }}
+.legend {{ margin-top: 12px; font-size: 12px; color:#6b7280; }}
 .lg {{ margin-right: 14px; }} .lg i {{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; }}
-.foot {{ margin-top: 40px; font-size: 12px; color:#6b7280; }}
+.toggle {{ font-size: 11px; text-transform:none; letter-spacing:0; padding:2px 10px;
+          border:1px solid #c7ccd3; border-radius:12px; background:#fff; color:#374151; cursor:pointer; }}
+.foot {{ margin-top: 40px; font-size: 12px; color:#9aa0aa; }}
 </style></head><body><div class="wrap">
 <h1>wxmax &mdash; daily maximum temperature panel</h1>
-<div class="sub">11 US cities &middot; ground truth = NWS Climatological Report (CLI) &middot;
-latest day <b>{day}</b> &middot; generated {gen}</div>
+<div class="today">{date_str}</div>
+<div class="sub">12 US cities &middot; ground truth = NWS Climatological Report (CLI) &middot; generated {gen}</div>
 
 <h2>Today's panel</h2>
 <table><tr><th>City</th><th class="num">Max &deg;F</th><th class="num">Interval</th><th>Call</th></tr>
 {_today_panel_rows(est, names)}</table>
 
+<h2>Realized max temperature (NWS CLI) over time</h2>
+{_realized_section(truth, names)}
+
 <h2>Forecast accuracy vs NWS CLI (MAE &deg;F)</h2>
 <table><tr><th>City</th><th class="num">MAE</th><th class="num">n days</th></tr>
 {_accuracy_rows(est, truth, names)}</table>
 
-<h2>Per-region expert weights (online learner)</h2>
+<h2>Per-region expert weights <button id="wbtn" class="toggle" onclick="toggleW()">hide</button></h2>
+<div id="weights">
 {_weight_bars(weights, names)}
+</div>
 
 <div class="foot">Free, public-domain data only (NWS API, NOAA NODD, ECMWF Open Data, IEM).
-Online source selection via Hedge + Fixed-Share. &copy; built with wxmax.</div>
+Online source selection via Hedge + Fixed-Share. Built with wxmax.</div>
+<script>
+function toggleW() {{
+  var w = document.getElementById('weights'), b = document.getElementById('wbtn');
+  var hidden = w.style.display === 'none';
+  w.style.display = hidden ? '' : 'none';
+  b.textContent = hidden ? 'hide' : 'show';
+}}
+</script>
 </div></body></html>"""
     out = cfg.docs_dir / "index.html"
     out.write_text(html)

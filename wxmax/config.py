@@ -46,6 +46,7 @@ PANEL_STATIONS: tuple[str, ...] = (
     "KDCA",  # Washington DC (Reagan National — official DC site)
     "KMSY",  # New Orleans
     "KDEN",  # Denver
+    "KMDW",  # Chicago Midway
 )
 
 

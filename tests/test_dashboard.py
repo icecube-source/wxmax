@@ -32,5 +32,10 @@ def test_dashboard_renders(tmp_path, monkeypatch):
     assert out.exists() and out.name == "index.html"
     assert "Los Angeles Intl" in html and "Phoenix Sky Harbor Intl" in html
     assert "TEST-TS" in html
-    assert "MAE" in html                 # accuracy section populated (estimates overlap truth)
+    assert "MAE" in html                       # accuracy section populated
     assert "expert weights" in html.lower()
+    # new features:
+    assert "#f7f8fa" in html                   # light theme
+    assert "toggleW" in html                   # collapsible weights
+    assert "Realized max temperature" in html  # realized-over-time section
+    assert "June" in html                      # today's date rendered in header
